@@ -32,6 +32,7 @@ logger.add(
 
 async def main(num_miners: int):
     miners = []
+    startup_tasks = []
     for i in range(num_miners):
         hotkey = settings.MINER_HOTKEYS[i]
         device = f"cuda:{i}"
@@ -44,8 +45,11 @@ async def main(num_miners: int):
             device=device,
         )
         miners.append(miner)
-        await miner.start()
-        await asyncio.sleep(random.random() * 0.1)
+        startup_tasks.append(miner.start())
+    
+    logger.info(f"Launching {len(startup_tasks)} miners in parallel")
+    miner_tasks = await asyncio.gather(*startup_tasks)
+    logger.info("All miners have been lauched")
 
     start = time.time()
     while True:
