@@ -1037,7 +1037,7 @@ class Miner(BaseNeuron):
             activation_grads_path = activation.activation_path
             activation_grads = download_activation(path=activation_grads_path)
 
-            activation_grads = activation_grads.to(settings.DEVICE)
+            activation_grads = activation_grads.to(self.device)
 
             logger.debug(f"📥 Downloaded activation gradients from {activation_grads_path}")
 
