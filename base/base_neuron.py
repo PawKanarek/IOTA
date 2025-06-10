@@ -10,7 +10,12 @@ import torch.optim as optim
 from loguru import logger
 from pydantic import BaseModel, Field
 import settings
-from utils.vector_utils import add_artificial_gradients, flatten_optimizer_state, reconstruct_optimizer_state
+from utils.vector_utils import (
+    add_artificial_gradients,
+    check_for_nans,
+    flatten_optimizer_state,
+    reconstruct_optimizer_state,
+)
 from transformers import PreTrainedTokenizer, AutoTokenizer
 
 from miner.api_client import APIClient
@@ -176,6 +181,7 @@ class BaseNeuron(BaseModel):
 
             # Allocate memory to the full 1d tensor
             new_weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
+            check_for_nans(new_weights, f"current weights for miner {self.hotkey[:8]}")
 
             # Set random gradients
             add_artificial_gradients(self.model, self.device)
@@ -184,6 +190,7 @@ class BaseNeuron(BaseModel):
             self.optimizer.step()
             self.optimizer.zero_grad()
             flat_tensor, tensor_shapes, state_dict = flatten_optimizer_state(self.optimizer, device=self.device)
+            check_for_nans(flat_tensor, f"current optimizer state for miner {self.hotkey[:8]}")
             # Convert to numpy array
             new_optimizer_state = flat_tensor  # .to(torch.float16).detach().cpu().numpy(force=True)
 
@@ -202,6 +209,10 @@ class BaseNeuron(BaseModel):
                 new_optimizer_state[
                     partition.optimizer_state_data.chunk_start_idx : partition.optimizer_state_data.chunk_end_idx
                 ] = shard_optimizer_state
+
+            # Check to make sure we didn't download any nans
+            check_for_nans(new_weights, f"weights downloaded for miner {self.hotkey[:8]}")
+            check_for_nans(new_optimizer_state, f"optimizer downloaded for miner {self.hotkey[:8]}")
 
             # assign weights to self.model
             # reshape thecomplete 1D tensor into the appropriate shape
@@ -276,6 +287,7 @@ class BaseNeuron(BaseModel):
             input_activations.requires_grad_(True)
         self.model.to(self.device)
         output_activations = self.model(input_activations.to(self.device))
+        logger.warning(f"WEIGHTS: {torch.nn.utils.parameters_to_vector(self.model.parameters())}")
         return output_activations
 
     async def _backward(
