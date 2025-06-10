@@ -920,7 +920,7 @@ class Miner(BaseNeuron):
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Processing activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
 
-            input_activations = download_activation(path=input_activation_path)
+            input_activations = download_activation(path=input_activation_path, device=self.device)
             logger.debug(f"📥 Downloaded activation from {input_activation_path}")
 
         output_activations, state = await self._forward(input_activations)
@@ -934,7 +934,7 @@ class Miner(BaseNeuron):
                     f"❌ No input activation path found for layer {self.layer}, miner {self.hotkey[:8]} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
-            initial_activations = download_activation(path=initial_activations_path)
+            initial_activations = download_activation(path=initial_activations_path, device=self.device)
             logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
 
             output_activations = model_utils.compute_loss(
@@ -1004,7 +1004,7 @@ class Miner(BaseNeuron):
             # For backward pass, we need to get activations that we have cached forward activations for
             # So we still need to list first, then filter, then randomly select
             activation_grads_path = activation.activation_path
-            activation_grads = download_activation(path=activation_grads_path)
+            activation_grads = download_activation(path=activation_grads_path, device=self.device)
 
             activation_grads = activation_grads.to(self.device)
 
