@@ -97,6 +97,7 @@ class BaseNeuron(BaseModel):
     uid: int | None = None
     wallet_name: str | None = None
     wallet_hotkey: str | None = None
+    device: str | None = None
     orchestrator_version: str = ""
 
     def _clean_gpu_memory(self):
@@ -177,12 +178,12 @@ class BaseNeuron(BaseModel):
             new_weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
 
             # Set random gradients
-            add_artificial_gradients(self.model)
+            add_artificial_gradients(self.model, self.device)
 
             # Take a step to populate internal state
             self.optimizer.step()
             self.optimizer.zero_grad()
-            flat_tensor, tensor_shapes, state_dict = flatten_optimizer_state(self.optimizer)
+            flat_tensor, tensor_shapes, state_dict = flatten_optimizer_state(self.optimizer, device=self.device)
             # Convert to numpy array
             new_optimizer_state = flat_tensor  # .to(torch.float16).detach().cpu().numpy(force=True)
 
@@ -273,8 +274,8 @@ class BaseNeuron(BaseModel):
     async def _forward(self, input_activations: torch.Tensor):
         if self.layer is not None and self.layer > 0:
             input_activations.requires_grad_(True)
-        self.model.to(DEVICE)
-        output_activations = self.model(input_activations.to(DEVICE))
+        self.model.to(self.device)
+        output_activations = self.model(input_activations.to(self.device))
         return output_activations
 
     async def _backward(
@@ -324,7 +325,7 @@ class BaseNeuron(BaseModel):
             self.model = load_model_split(
                 model_cfg=MODEL_CFG,
                 model_split=MODEL_SPLITS[self.layer],
-                device=DEVICE,
+                device=self.device,
                 seed=42,
             )
             # put the model in train mode
@@ -339,7 +340,7 @@ class BaseNeuron(BaseModel):
                         settings.BATCH_SIZE,
                         settings.SEQUENCE_LENGTH,
                         MODEL_CFG["bottleneck_dim"] or MODEL_CFG["emb_dim"],
-                    ).to(DEVICE)
+                    ).to(self.device)
                 )
 
         except ValueError as e:
@@ -352,7 +353,7 @@ class BaseNeuron(BaseModel):
 
     async def _load_optimizer(self):
         self.optimizer = optim.AdamW(self.model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-        add_artificial_gradients(self.model)
+        add_artificial_gradients(self.model, self.device)
         self.optimizer.step()
         self.optimizer.zero_grad()
 
@@ -575,14 +576,14 @@ class BaseNeuron(BaseModel):
 
     async def _load_data(self):
         if MOCK:
-            mock_data = torch.randn(100, 100).to(DEVICE).to(torch.bfloat16)
+            mock_data = torch.randn(100, 100).to(self.device).to(torch.bfloat16)
             logger.info(f"Generated mock data sample of shape {mock_data.shape}")
             return mock_data
 
         data_sample = next(self.dataloader)
         logger.info(f"Loaded data sample of shape {data_sample.shape}")
 
-        return data_sample.to(DEVICE)
+        return data_sample.to(self.device)
 
     async def local_all_reduce(self):
         logger.info(f"{self.hotkey} updating weights after {self.backwards_since_reduce} steps")

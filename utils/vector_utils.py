@@ -4,14 +4,14 @@ from torch.optim import Optimizer
 import settings
 
 
-def add_artificial_gradients(model):
-    model.to(settings.DEVICE)
+def add_artificial_gradients(model, device):
+    model.to(device)
     for param in model.parameters():
         if param.requires_grad:
-            param.grad = torch.zeros_like(param.data).to(dtype=torch.bfloat16).to(settings.DEVICE)
+            param.grad = torch.zeros_like(param.data).to(dtype=torch.bfloat16).to(device)
 
 
-def flatten_optimizer_state(optimizer, dtype=torch.bfloat16):
+def flatten_optimizer_state(optimizer, dtype=torch.bfloat16, device=settings.DEVICE):
     """Flatten all tensors in optimizer state dict into a single tensor."""
     state_dict = optimizer.state_dict()
     tensors = []
@@ -25,7 +25,7 @@ def flatten_optimizer_state(optimizer, dtype=torch.bfloat16):
             if k == "step":
                 continue
             if isinstance(v, torch.Tensor):
-                tensors.append(v.flatten().to(dtype).to(settings.DEVICE))
+                tensors.append(v.flatten().to(dtype).to(device))
                 tensor_shapes.append(v.shape)
 
     flat_tensor = torch.cat(tensors)

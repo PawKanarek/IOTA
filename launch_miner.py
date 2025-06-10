@@ -34,12 +34,14 @@ async def main(num_miners: int):
     miners = []
     for i in range(num_miners):
         hotkey = settings.MINER_HOTKEYS[i]
-        logger.info(f"Launching miner {hotkey}")
+        device = f"cuda:{i}"
+        logger.info(f"Launching miner {hotkey} on device {device}")
         miner = await Miner.create(
             wallet_name=settings.wallet_name,
             wallet_hotkey=hotkey,
             timeout=settings.TIMEOUT,
             n_layers=settings.N_LAYERS,
+            device=device,
         )
         miners.append(miner)
         await miner.start()
@@ -62,6 +64,7 @@ async def main_docker(hotkey: str):
         wallet_hotkey=settings.wallet_hotkey,
         timeout=settings.TIMEOUT,
         n_layers=settings.N_LAYERS,
+        device="cuda:0",
     )
     task = await miner.start()
     await task

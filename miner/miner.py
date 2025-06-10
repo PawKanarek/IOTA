@@ -95,12 +95,13 @@ class Miner(BaseNeuron):
         return ooc
 
     @classmethod
-    async def create(cls, wallet_name: str, wallet_hotkey: str, timeout: int, n_layers: int):
+    async def create(cls, wallet_name: str, wallet_hotkey: str, timeout: int, n_layers: int, device: str):
         miner = cls(
             wallet_name=wallet_name,
             wallet_hotkey=wallet_hotkey,
             TIMEOUT=timeout,
             N_LAYERS=n_layers,
+            device=device,
         )
         await miner.initialize()
         return miner
@@ -207,7 +208,7 @@ class Miner(BaseNeuron):
         # Create a new, pristine instance of the miner.
         # `create` will call `__init__` and `initialize`, setting up a fresh state.
         new_miner = await type(self).create(
-            settings.wallet_name, settings.wallet_hotkey, settings.TIMEOUT, settings.N_LAYERS
+            self.wallet_name, self.wallet_hotkey, settings.TIMEOUT, settings.N_LAYERS, self.device
         )
 
         # Replace the current object's state with the state of the new instance.
@@ -570,7 +571,7 @@ class Miner(BaseNeuron):
                 await self.local_all_reduce()
                 self.backwards_since_reduce = 0
 
-            flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer)
+            flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer, device=self.device)
             weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
 
             # Check to see if the weights or optimizer state have any nans
@@ -1049,8 +1050,8 @@ class Miner(BaseNeuron):
         cached_activations = self.saved_forward_activations[activation.activation_uid]
 
         # Move to GPU and enable gradients only for floating point tensors
-        input_activations = cached_activations[0].to(settings.DEVICE)
-        output_activations = cached_activations[1].to(settings.DEVICE)
+        input_activations = cached_activations[0].to(self.device)
+        output_activations = cached_activations[1].to(self.device)
 
         state = cached_activations[2]
 
@@ -1286,7 +1287,7 @@ class Miner(BaseNeuron):
                     "global_optimizer_steps": settings.GLOBAL_OPTIMIZER_STEPS,
                     "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_MERGING,
                     # Runtime configuration
-                    "device": str(settings.DEVICE),
+                    "device": str(self.device),
                     "mock_mode": settings.MOCK,
                     "completed_optim_steps": self.completed_optim_steps,
                 },
