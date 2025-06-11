@@ -32,18 +32,24 @@ logger.add(
 
 async def main(num_miners: int):
     miners = []
+    startup_tasks = []
     for i in range(num_miners):
         hotkey = settings.MINER_HOTKEYS[i]
-        logger.info(f"Launching miner {hotkey}")
+        device = f"cuda:{i}"
+        logger.info(f"Launching miner {hotkey} on device {device}")
         miner = await Miner.create(
             wallet_name=settings.wallet_name,
             wallet_hotkey=hotkey,
             timeout=settings.TIMEOUT,
             n_layers=settings.N_LAYERS,
+            device=device,
         )
         miners.append(miner)
-        await miner.start()
-        await asyncio.sleep(random.random() * 0.1)
+        startup_tasks.append(miner.start())
+    
+    logger.info(f"Launching {len(startup_tasks)} miners in parallel")
+    miner_tasks = await asyncio.gather(*startup_tasks)
+    logger.info("All miners have been lauched")
 
     start = time.time()
     while True:
@@ -62,6 +68,7 @@ async def main_docker(hotkey: str):
         wallet_hotkey=settings.wallet_hotkey,
         timeout=settings.TIMEOUT,
         n_layers=settings.N_LAYERS,
+        device="cuda:0",
     )
     task = await miner.start()
     await task

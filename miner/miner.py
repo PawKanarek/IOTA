@@ -96,12 +96,13 @@ class Miner(BaseNeuron):
         return ooc
 
     @classmethod
-    async def create(cls, wallet_name: str, wallet_hotkey: str, timeout: int, n_layers: int):
+    async def create(cls, wallet_name: str, wallet_hotkey: str, timeout: int, n_layers: int, device: str):
         miner = cls(
             wallet_name=wallet_name,
             wallet_hotkey=wallet_hotkey,
             TIMEOUT=timeout,
             N_LAYERS=n_layers,
+            device=device,
         )
         await miner.initialize()
         return miner
@@ -208,7 +209,7 @@ class Miner(BaseNeuron):
         # Create a new, pristine instance of the miner.
         # `create` will call `__init__` and `initialize`, setting up a fresh state.
         new_miner = await type(self).create(
-            settings.wallet_name, settings.wallet_hotkey, settings.TIMEOUT, settings.N_LAYERS
+            self.wallet_name, self.wallet_hotkey, settings.TIMEOUT, settings.N_LAYERS, self.device
         )
 
         # Replace the current object's state with the state of the new instance.
@@ -537,7 +538,7 @@ class Miner(BaseNeuron):
                 await self.local_all_reduce()
                 self.backwards_since_reduce = 0
 
-            flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer)
+            flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer, device=self.device)
             weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
 
             # Check to see if the weights or optimizer state have any nans
@@ -919,7 +920,7 @@ class Miner(BaseNeuron):
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Processing activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
 
-            input_activations = download_activation(path=input_activation_path)
+            input_activations = download_activation(path=input_activation_path, device=self.device)
             logger.debug(f"📥 Downloaded activation from {input_activation_path}")
 
         output_activations, state = await self._forward(input_activations)
@@ -933,7 +934,7 @@ class Miner(BaseNeuron):
                     f"❌ No input activation path found for layer {self.layer}, miner {self.hotkey[:8]} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
-            initial_activations = download_activation(path=initial_activations_path)
+            initial_activations = download_activation(path=initial_activations_path, device=self.device)
             logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
 
             output_activations = model_utils.compute_loss(
@@ -1003,9 +1004,9 @@ class Miner(BaseNeuron):
             # For backward pass, we need to get activations that we have cached forward activations for
             # So we still need to list first, then filter, then randomly select
             activation_grads_path = activation.activation_path
-            activation_grads = download_activation(path=activation_grads_path)
+            activation_grads = download_activation(path=activation_grads_path, device=self.device)
 
-            activation_grads = activation_grads.to(settings.DEVICE)
+            activation_grads = activation_grads.to(self.device)
 
             logger.debug(f"📥 Downloaded activation gradients from {activation_grads_path}")
 
@@ -1018,8 +1019,8 @@ class Miner(BaseNeuron):
         cached_activations = self.saved_forward_activations[activation.activation_uid]
 
         # Move to GPU and enable gradients only for floating point tensors
-        input_activations = cached_activations[0].to(settings.DEVICE)
-        output_activations = cached_activations[1].to(settings.DEVICE)
+        input_activations = cached_activations[0].to(self.device)
+        output_activations = cached_activations[1].to(self.device)
 
         state = cached_activations[2]
 
@@ -1267,7 +1268,7 @@ class Miner(BaseNeuron):
                     "global_optimizer_steps": settings.GLOBAL_OPTIMIZER_STEPS,
                     "miners_required_for_merging": settings.MINERS_REQUIRED_FOR_MERGING,
                     # Runtime configuration
-                    "device": str(settings.DEVICE),
+                    "device": str(self.device),
                     "mock_mode": settings.MOCK,
                     "completed_optim_steps": self.completed_optim_steps,
                 },
