@@ -24,7 +24,7 @@ if os.path.exists("miners.log"):
 
 logger.add(
     "miners.log",
-    rotation="5 MB",  # Rotate at 5MB
+    rotation="50 MB",  # Rotate at 50MB
     level="DEBUG",
     retention=1,  # Keep only latest log file
 )

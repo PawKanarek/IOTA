@@ -5,7 +5,8 @@ import settings
 
 
 def add_artificial_gradients(model):
-    model.to(settings.DEVICE)
+    # model.to(settings.DEVICE)
+    print(f"Adding artificial gradients to model")
     for param in model.parameters():
         if param.requires_grad:
             param.grad = torch.zeros_like(param.data).to(dtype=torch.bfloat16).to(settings.DEVICE)

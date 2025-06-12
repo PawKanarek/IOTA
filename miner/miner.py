@@ -26,6 +26,7 @@ from utils.partitions import ChunkData, Partition
 from utils.vector_utils import check_for_nans, flatten_optimizer_state
 from orchestrator.serializers import SubmittedWeights
 from storage.serializers import ActivationResponse
+from base.base_neuron import get_gpu_memory_usage
 
 
 WAIT_TIME = 5 if settings.MOCK else 15
@@ -292,7 +293,7 @@ class Miner(BaseNeuron):
                         # Final memory check after loading
                         if torch.cuda.is_available():
                             allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
-                            logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB")
+                            logger.debug(f"💾 GPU memory: {allocated_memory:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
                         if settings.N_LAYERS == 1:
                             await self.local_step()
@@ -336,6 +337,7 @@ class Miner(BaseNeuron):
         logger.info(
             f"🔄 Miner {self.hotkey[:8]} step | len(saved_forward_activations): {len(self.saved_forward_activations)}"
         )
+        logger.info(f"step memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         try:
             if self.saved_forward_activations:
@@ -359,7 +361,13 @@ class Miner(BaseNeuron):
                 # Clear cache before weight syncing
                 self.saved_forward_activations.clear()
                 try:
+                    logger.info(f"Before sync weights: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+                    # before sync weights: 23.30GB vs gpu: 27.12GB
                     await self.sync_weights(num_sections=int(result["num_sections"]))
+                    logger.info(f"After sync weights: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    logger.info(f"After empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                     self.training = True
                     return
                 except Exception as e:
@@ -375,7 +383,9 @@ class Miner(BaseNeuron):
                 logger.info(
                     f"🔄 Performing local all-reduce for miner {self.hotkey[:8]} | Steps: {self.backwards_since_reduce}"
                 )
+                logger.info(f"Before local all reduce: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 await self.local_all_reduce()
+                logger.info(f"After local all reduce: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 self.saved_forward_activations.clear()
                 self.backwards_since_reduce = 0
                 return
@@ -528,17 +538,30 @@ class Miner(BaseNeuron):
             logger.info(
                 f"🔄 Starting weight sync for miner {self.hotkey[:8]} | Layer: {self.layer} | Epoch: {self.epoch} | Steps since sync: {self.backwards_since_sync}"
             )
+            logger.info(f"Before sync weights: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             # Clear cache before weight syncing to free memory
             self.saved_forward_activations.clear()
+    
+            logger.info(f"After clear: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info(f"After empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            logger.info(f"After gc: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+
 
             # If local optimizer steps are smaller than global optimizer steps, we already handle them in step()
             if settings.LOCAL_OPTIMIZER_STEPS >= settings.GLOBAL_OPTIMIZER_STEPS:
                 await self.local_all_reduce()
                 self.backwards_since_reduce = 0
 
+            logger.info(f"Before flatten optimizer state: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             flattened_optimizer_state, _, _ = flatten_optimizer_state(self.optimizer)
+            logger.info(f"After flatten optimizer state: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
+            logger.info(f"After weights: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             # Check to see if the weights or optimizer state have any nans
             try:
@@ -556,14 +579,15 @@ class Miner(BaseNeuron):
                             f"❌ Miner {self.hotkey[:8]} has NaNs in {name} | {num_nans} / {total} = {percentage:.2f}%"
                         )
                         raise Exception(f"{name} has NaNs")
-
                 # Move tensors back to original device
+                logger.info(f"Before move back to original device: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 weights = weights.to(original_device)
                 flattened_optimizer_state = flattened_optimizer_state.to(original_device)
+                logger.info(f"After move back to original device: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             except Exception as e:
                 raise e
-
+            logger.info(f"Before sending: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.info(f"📤 Uploading weights and optimizer state | Sections: {num_sections}")
             (
                 weight_path,
@@ -578,10 +602,21 @@ class Miner(BaseNeuron):
                 num_sections=num_sections,
                 epoch=self.epoch,
             )
+            logger.info(f"Afters sending: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            weights.to("cpu")
+            flattened_optimizer_state.to("cpu")
+            logger.info(f"After to cpu: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            del weights
+            del flattened_optimizer_state
+            logger.info(f"After del: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info(f"After empty_cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+
             logger.debug(
                 f"Epoch {self.epoch}: Uploading weights to {weight_path} and metadata to {weight_metadata_path} and optimizer state to {optimizer_state_path} and metadata to {optimizer_state_metadata_path}"
             )
-            logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | layer {self.layer} | {weights}")
+            logger.debug(f"EPOCH {self.epoch}: UPLOADING WEIGHTS: {self.hotkey} | layer {self.layer} ")
 
             logger.info("📤 Notifying orchestrator of uploaded weights...")
             success = await self.api_client.notify_weights_uploaded(
@@ -601,6 +636,8 @@ class Miner(BaseNeuron):
             information_packets, partition_ids = await self.api_client.weight_partition_info()
             information_packets = [SubmittedWeights(**packet) for packet in information_packets]
 
+
+            logger.info(f"Before merge: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             # download the partitons, apply the merge (simple avg) and upload the merged weights
             logger.info(f"🔄 Attempting to merge {len(information_packets)} weight partitions...")
             partitions: list[Partition] = await self._merge_models(
@@ -609,6 +646,7 @@ class Miner(BaseNeuron):
                 num_sections=num_sections,
             )
 
+            logger.info(f"After merge: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.info(f"📤 Notifying orchestrator of {len(partitions)} merged partitions, epoch {self.epoch}")
             success = await self.api_client.notify_merged_partitions_uploaded(partitions=partitions)
 
@@ -621,8 +659,9 @@ class Miner(BaseNeuron):
             self.training = True  # always default back to training.
         except Exception as e:
             logger.exception(f"❌ Miner {self.hotkey[:8]} failed to sync weights: {e}")
-
+        logger.info(f"Before move to training: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         await self.move_to_training()
+        logger.info(f"After move to trainig: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
     async def move_to_training(self):
         """Move the miner to the training phase."""
@@ -691,6 +730,7 @@ class Miner(BaseNeuron):
         # Then perform merge, upload and move on to the next partition index
         for chunk_id in partition_ids:
             logger.debug(f"Miner {self.hotkey} merging chunk {chunk_id} from {len(information_packets)} miners")
+            logger.info(f"Before merge: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             weight_average = None
             optimizer_state_average = None
             weight_counter = 1
@@ -720,6 +760,7 @@ class Miner(BaseNeuron):
                         chunk_id=chunk_id,
                         data_type="optimizer_state",
                     )
+                    logger.info(f"After download chunk: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                     assert (
                         weight_start_idx is None
                         or weight_start_idx == weight_metadata["sections"][str(chunk_id)]["start_idx"]
@@ -767,12 +808,14 @@ class Miner(BaseNeuron):
                         f"Error downloading chunk {chunk_id} from {weights_path} and {weight_metadata_path}: {e}"
                     )
                     continue
+            logger.info(f"Before average: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             # Average the weights
             weight_average /= weight_counter
             weight_average = weight_average.to(torch.bfloat16)
             optimizer_state_average /= optimizer_state_counter
             optimizer_state_average = optimizer_state_average.to(torch.bfloat16)
+            logger.info(f"After average: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             (
                 weight_path,
@@ -787,6 +830,7 @@ class Miner(BaseNeuron):
                 num_sections=1,
                 epoch=self.epoch,
             )
+            logger.info(f"After upload: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             weight_data = ChunkData(
                 chunk_number=chunk_id,
@@ -802,6 +846,7 @@ class Miner(BaseNeuron):
                 chunk_length=optimizer_state_end_idx - optimizer_state_start_idx,
                 chunk_dtype=str(optimizer_state_average.dtype).split(".")[-1],
             )
+            logger.info(f"After upload: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.debug(f"MINER UPLOADING MERGED PARTITIONS: {weight_data}")
             logger.debug(f"MINER UPLOADING MERGED PARTITIONS, REAL SIZE: {weight_average.shape}")
             logger.debug(f"MINER UPLOADING MERGED PARTITIONS: {optimizer_state_data}")
@@ -893,17 +938,21 @@ class Miner(BaseNeuron):
             ), f"Initial activation is required for layer {self.layer}, activation: {activation}"
 
         if self.layer == 0:
+            logger.info(f"Before load data: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             input_activations = await self._load_data()
+            logger.info(f"After load data: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             activation_uid = str(uuid.uuid4())
 
             logger.info(
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Generating initial activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
+            logger.info(f"Before upload activations: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             await self.upload_activations(
                 activation_uid=activation_uid,
                 activations=input_activations.detach().clone(),
                 direction="initial",
             )
+            logger.info(f"After upload activations: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         else:
             activation_uid = activation.activation_uid
@@ -919,10 +968,14 @@ class Miner(BaseNeuron):
                 f"🚀 Starting FORWARD pass for layer {self.layer} | Processing activation {activation_uid} | Miner: {self.hotkey[:8]}"
             )
 
+            logger.info(f"Before download activation: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             input_activations = download_activation(path=input_activation_path)
+            logger.info(f"After download activation: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.debug(f"📥 Downloaded activation from {input_activation_path}")
 
+        logger.info(f"Before forward: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")   
         output_activations, state = await self._forward(input_activations)
+        logger.info(f"After forward: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         self.saved_forward_activations[activation_uid] = (input_activations, output_activations, state, time.time())
 
@@ -933,9 +986,12 @@ class Miner(BaseNeuron):
                     f"❌ No input activation path found for layer {self.layer}, miner {self.hotkey[:8]} is idle. For activation {activation_uid} and layer path {initial_activations_path} was returned"
                 )
                 return
+            logger.info(f"Before download initial activation: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             initial_activations = download_activation(path=initial_activations_path)
+            logger.info(f"After download initial activation: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.debug(f"📥 Downloaded initial activation from {initial_activations_path}")
 
+            logger.info(f"Before compute loss: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             output_activations = model_utils.compute_loss(
                 logits=output_activations,
                 targets=initial_activations,
@@ -943,23 +999,33 @@ class Miner(BaseNeuron):
                 pad_token_id=self.eos_token_id,
                 pack=settings.PACK_SAMPLES,
             )
-
+            logger.info(f"After compute loss: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.info(
                 f"📊 Computed loss {output_activations:.6f} for activation {activation_uid} | Layer: {self.layer} | Miner: {self.hotkey[:8]}"
             )
             try:
+                logger.info(f"Before report loss: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 await self.api_client.report_loss(activation_uid=activation_uid, loss=float(output_activations))
+                logger.info(f"After report loss: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 logger.debug("📤 Reported loss to orchestrator")
             except Exception as e:
                 logger.error(f"❌ Error reporting loss: {e}")
+            
+            # After forward pass, before caching:
+            if not input_activations.requires_grad:
+                input_activations = input_activations.detach()
+            if not output_activations.requires_grad:
+                output_activations = output_activations.detach()
 
             # Update saved activations with loss (keep on CPU)
+            logger.info(f"Before update saved activations: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             self.saved_forward_activations[activation_uid] = (
-                input_activations,
-                output_activations,
+                input_activations.cpu(),
+                output_activations.cpu(),
                 state,
                 time.time(),
             )
+            logger.info(f"After compute loss: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             result = await self.api_client.update_status(
                 status="forward", activation_uid=activation_uid, activation_path=None
@@ -968,7 +1034,9 @@ class Miner(BaseNeuron):
             self._handle_bad_state(result)
 
             try:
+                logger.info(f"Before backward: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 await self.backward(activation=activation)
+                logger.info(f"After backward: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
                 # Log the loss and other training state information to wandb.
                 # This is used for monitoring the loss during testing
@@ -980,15 +1048,27 @@ class Miner(BaseNeuron):
                 logger.exception(f"❌ Error during backward step on last layer: {e}")
 
         else:
+            logger.info(f"Before upload activations: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             await self.upload_activations(
                 activation_uid=activation_uid,
                 activations=output_activations.detach().clone(),
                 direction="forward",
             )
+            logger.info(f"After upload activations: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         logger.info(
             f"✅ Successfully completed FORWARD pass for activation {activation_uid} on layer {self.layer} | Miner: {self.hotkey[:8]}"
         )
+        logger.info(f"memory before moving forward act to cpu: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+        for activation_uid, fwd_act in self.saved_forward_activations.items():
+            input_act, output_act, state, timestamp = fwd_act
+            self.saved_forward_activations[activation_uid] = (
+                input_act.cpu(),
+                output_act.cpu(), 
+                state,
+                timestamp
+            )
+        logger.info(f"memory after moving forward act to cpu: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
     async def backward(
         self,
@@ -1060,6 +1140,16 @@ class Miner(BaseNeuron):
             activations=input_activation_grads,
             direction="backward",
         )
+        logger.info(f"memory before moving back forward act to cpu: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+        for activation_uid, fwd_act in self.saved_forward_activations.items():
+            input_act, output_act, state, timestamp = fwd_act
+            self.saved_forward_activations[activation_uid] = (
+                input_act.cpu(),
+                output_act.cpu(), 
+                state,
+                timestamp
+            )
+        logger.info(f"memory after moving back forward act to cpu: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         logger.info(
             f"✅ Successfully completed BACKWARD pass for activation {activation.activation_uid} | Layer: {self.layer} | Miner: {self.hotkey[:8]}"

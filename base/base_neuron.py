@@ -43,6 +43,25 @@ from utils.bt_utils import get_subtensor, NotRegisteredError
 from utils.partitions import ChunkData, Partition
 from utils.s3_interactions import download_metadata, download_weights_or_optimizer_state
 
+import subprocess
+def get_gpu_memory_usage():
+    result = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,nounits,noheader"], encoding="utf-8")
+    return float(result.split()[0])
+    
+def move_optimizer_state_to_cpu(optimizer):
+    logger.debug("Moving optimizer state to CPU")
+    for group in optimizer.state.values():
+        for key, value in group.items():
+            if isinstance(value, torch.Tensor) and value.is_cuda:
+                group[key] = value.cpu()
+    
+def move_optimizer_state_to_gpu(optimizer, device):
+    logger.debug("Moving optimizer state to GPU")
+    for group in optimizer.state.values():
+        for key, value in group.items():
+            if isinstance(value, torch.Tensor) and not value.is_cuda:
+                group[key] = value.to(device)
+
 
 class MockModel(torch.nn.Module):
     def __init__(self):
@@ -177,20 +196,27 @@ class BaseNeuron(BaseModel):
         try:
             logger.debug(f"Downloading weights for layer {self.layer} for miner {self.hotkey[:8]}")
             merged_partitions: list[Partition] = await self.api_client.get_layer_weights(layer=self.layer)
-
+            logger.info(f"Memory before weights assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             # Allocate memory to the full 1d tensor
             new_weights = torch.nn.utils.parameters_to_vector(self.model.parameters())
+            logger.info(f"Memory after weights assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             check_for_nans(new_weights, f"current weights for miner {self.hotkey[:8]}")
 
             # Set random gradients
             add_artificial_gradients(self.model)
+            logger.info(f"Memory after artificial gradients: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
             # Take a step to populate internal state
             self.optimizer.step()
             self.optimizer.zero_grad()
+            logger.info(f"Memory after optimizer step: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             flat_tensor, tensor_shapes, state_dict = flatten_optimizer_state(self.optimizer)
+            logger.info(f"Memory after flatten optimizer state: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             check_for_nans(flat_tensor, f"current optimizer state for miner {self.hotkey[:8]}")
             # Convert to numpy array
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info(f"Memory after empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             new_optimizer_state = flat_tensor  # .to(torch.float16).detach().cpu().numpy(force=True)
 
             for partition in merged_partitions:
@@ -212,9 +238,11 @@ class BaseNeuron(BaseModel):
                     new_weights[
                         partition.weight_data.chunk_start_idx : partition.weight_data.chunk_end_idx
                     ] = weight_shard
+                    logger.info(f"Memory after weight shard assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                     new_optimizer_state[
                         partition.optimizer_state_data.chunk_start_idx : partition.optimizer_state_data.chunk_end_idx
                     ] = shard_optimizer_state
+                    logger.info(f"Memory after optimizer state shard assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 except Exception as e:
                     logger.error(f"Error downloading weights: {e}")
                     raise
@@ -226,11 +254,19 @@ class BaseNeuron(BaseModel):
             # assign weights to self.model
             # reshape thecomplete 1D tensor into the appropriate shape
             self.weights = new_weights
+            logger.info(f"Memory after weights assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             new_optimizer_state = reconstruct_optimizer_state(
                 new_optimizer_state, tensor_shapes, state_dict, self.optimizer
             )
+            logger.info(f"Memory after reconstruct optimizer state: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             torch.nn.utils.vector_to_parameters(new_weights, self.model.parameters())
+            logger.info(f"Memory after vector to parameters: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             logger.debug(f"Successfully applied weights to model for layer {self.layer}")
+            logger.info(f"Memory after weights assignment: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info(f"Memory after empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+
             return new_weights, new_optimizer_state
         except Exception as e:
             logger.exception(f"Error downloading weights: {e}")
@@ -343,12 +379,14 @@ class BaseNeuron(BaseModel):
         logger.info(f"Loading model from {MODEL_CFG['model_name']} with split {MODEL_SPLITS[self.layer]}")
 
         try:
+            logger.info(f"Memory before model load: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             self.model = load_model_split(
                 model_cfg=MODEL_CFG,
                 model_split=MODEL_SPLITS[self.layer],
                 device=DEVICE,
                 seed=42,
             )
+            logger.info(f"Memory after model load: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
             # put the model in train mode
             self.model.train()
 
@@ -356,6 +394,7 @@ class BaseNeuron(BaseModel):
             # the bottleneck dynamically changes it size based on the input data.
             if self.layer > 0:
                 logger.success(f"Populating bottleneck decoder for layer {self.layer}")
+                logger.info(f"Memory before forward pass: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
                 self.model.forward(
                     torch.zeros(
                         settings.BATCH_SIZE,
@@ -363,6 +402,7 @@ class BaseNeuron(BaseModel):
                         MODEL_CFG["bottleneck_dim"] or MODEL_CFG["emb_dim"],
                     ).to(DEVICE)
                 )
+                logger.info(f"Memory after forward pass: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         except ValueError as e:
             logger.exception(f"{e}")
@@ -373,12 +413,19 @@ class BaseNeuron(BaseModel):
         logger.info(f"Number of parameters in the model: {sum(p.numel() for p in self.model.parameters()) / 1e9}B")
 
     async def _load_optimizer(self):
+        logger.info(f"Memory before optimizer load: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         self.optimizer = optim.AdamW(self.model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        logger.info(f"Memory after optimizer load: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         add_artificial_gradients(self.model)
+        logger.info(f"Memory before optimizer step: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         self.optimizer.step()
         self.optimizer.zero_grad()
-
+        logger.info(f"Memory after optimizer step: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        logger.info(f"Memory after empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         logger.info(f"Loaded optimizer with learning rate {LEARNING_RATE} and weight decay {WEIGHT_DECAY}")
+
 
     async def _load_lr_scheduler(self):
         """
@@ -608,9 +655,13 @@ class BaseNeuron(BaseModel):
         return data_sample.to(DEVICE)
 
     async def local_all_reduce(self):
+        logger.info(f"memory before local all reduce: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
         logger.info(f"{self.hotkey} updating weights after {self.backwards_since_reduce} steps")
         # if not settings.MOCK:
         logger.warning(f"{self.hotkey} is stepping")
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        logger.info(f"memory after empty cache: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         self.optimizer.step()
         self.lr_scheduler.step()
@@ -619,12 +670,19 @@ class BaseNeuron(BaseModel):
         self.completed_optim_steps += 1
 
         self.backwards_since_reduce = 0
-        self.saved_forward_activations = {}
+        logger.info(f"memory before clear: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+
+        self.saved_forward_activations.clear()
+        logger.info(f"memory after clear: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        logger.info(f"memory after gc: {torch.cuda.memory_allocated() / 1024**3:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
         # Log GPU memory after weight update
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-            logger.debug(f"GPU memory after local all reduce: {allocated:.2f}GB")
+            logger.debug(f"GPU memory after local all reduce: {allocated:.2f}GB vs gpu: {get_gpu_memory_usage() / 1024:.2f}GB")
 
     @property
     def block(self):
